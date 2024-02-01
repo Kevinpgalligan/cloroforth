@@ -119,3 +119,32 @@ So there are two interpreters: one executes the data (list of addresses, list of
 - Why does ' return the codeword of a token? Should it not return the address of the dictionary entry for that word? I think that must be what it does?
 
 Might need an extra return stack, for tracking memory addresses in our big blob of memory.
+
+### Roadmap
+== Step 1: colon definitions.
+First, DOCOL.
+Next, : compiler:
+  Read word from input stream, create dictionary header w/ that word.
+  Write DOCOL to codeword field.
+  Loop, implement
+
+== Step 2: QUIT 
+From Starting Forth:
+
+: QUIT BEGIN
+    (clear return stack)
+    (accept input)
+    INTERPRET
+    ." ok " CR
+  AGAIN
+
+Maybe implement in low-level first, without loops.
+
+- CLEAR (codeword to drop the return stack).
+- Something to read a word into memory somewhere, from input stream.
+- INTERPRET: Dictionary lookup. If not in dictionary, number conversion.
+- EXECUTE (execute c/w of word address that is currently on stack).
+- ." and " -- these can be colon words, I guess? With IMMEDIATE.
+
+== Step 3: conditionals.
+First do the primitives, 0branch or whatever.
