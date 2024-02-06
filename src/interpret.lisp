@@ -7,19 +7,11 @@
 ;;; currently-used Forth state.
 (defparameter *state* nil)
 (defparameter *ip* nil "Instruction pointer.")
-(defparameter *sp* nil "Stack pointer.")
+(defparameter *sp* nil "Parameter stack pointer.")
+(defparameter *rp* nil "Return stack pointer.")
 (defparameter *dp* nil "Dictionary pointer.")
 (defparameter *here* nil "First free address after dictionary.")
-(defparameter *ret* nil "Return stack.")
 (defparameter *mem* nil "Memory array.")
-
-;;; Small utility class for the return stack.
-(defclass stack ()
-  ((data :initarg :data :accessor data)))
-(defun make-stack ()
-  (make-instance 'stack :data nil))
-(defun stack-push (s item) (push item (data s)))
-(defun stack-pop (s) (pop (data s)))
 
 ;;; Forth state.
 (defclass forth-state ()
@@ -27,6 +19,7 @@
    (dp :initarg :dp :accessor dp)
    (here :initarg :here :accessor here)
    (sp :initarg :sp :accessor sp)
+   (rp :initarg :rp :accessor rp)
    (retstack :initarg :retstack :accessor retstack)
    (memory :initarg :memory :accessor memory)
    (dict :initform nil :accessor dict)))
@@ -37,7 +30,7 @@
                  :dp 0
                  :here 0
                  :sp (1- memory-size)
-                 :retstack (make-stack)
+                 :rp 0 ; nee
                  :memory (make-array memory-size)))
 
 (defclass dict-entry ()
@@ -69,28 +62,35 @@
            (*dp* (dp ,state))
            (*here* (here ,state))
            (*sp* (sp ,state))
-           (*ret* (retstack ,state))
+           (*rp* (rp ,state))
            (*mem* (memory ,state)))
        ,@body)))
 
 
 ;;; Next, low-level primitives used for interacting with the
-;;; active Forth state.
+;;; active Forth state. All prefixed with 'f' to distinguish them.
+
+(defmacro def-stack-ops (push-name pop-name var-name increasing)
+  `(progn
+     (defun ,push-name (x)
+       (setf (aref *mem* ,var-name) x)
+       (,(if increasing 'incf 'decf) ,var-name))
+     (defun ,pop-name ()
+       ,(if increasing
+            `(when (>= ,var-name (length *mem*))
+              (error "Stack is empty."))
+            nil)
+       (incf ,var-name)
+       (aref *mem* ,var-name))))
 
 ;;; Push and pop to/from the Forth parameter stack.
-(defun fpush (x)
-  (setf (aref *mem* *sp*) x)
-  (decf *sp*))
-(defun fpop ()
-  (if (>= *sp* (length *mem*))
-      (error "Stack is empty.")
-      (progn
-        (incf *sp*)
-        (aref *mem* *sp*))))
+(def-stack-ops fpush fpop *sp* nil)
+;;; And the return stack.
+(def-stack-ops fpush-ret fpop-ret *rp* t)
 
 ;;; Convenience functions for memory.
 (defun fmemget (addr)
-  "Gets the value at ADDR in memory."
+  "Gets the value at address ADDR in memory."
   (aref *mem* addr))
 (defun fmemset (addr value)
   (setf (aref *mem* addr) value))
@@ -98,7 +98,6 @@
   "Gets the value *pointed to* by the value at ADDR in memory."
   (fmemget (fmemget addr)))
 (defun fdictwrite (x)
-  "Writes a value to the dictionary and increases the dictionary pointer."
   (fmemset *here* x)
   (incf *here*))
 
@@ -159,6 +158,36 @@
 (defcode "."
   (format t "~a~%" (fpop)))
 
+(defcode "docol"
+  (fpush-ret *ip*)
+  ;; Implicitly allowing fnext to increment the instruction pointer.
+  ;; This idea is used in various places.
+  (setf *ip* (fmemget-pointer *ip*)))
+
+(defcode "exit"
+  (setf *ip* (fpop-ret)))
+
+(defcode "lit"
+  (fpush (fmemget (1+ *ip*)))
+  (incf *ip*))
+
+(defcode "!"
+  (fmemset (fpop) (fpop)))
+(defcode "@"
+  (fpush (fmemget (fpop))))
+
+(defcode ">R"
+  (fpush-ret (fpop)))
+(defcode "R>"
+  (fpush (fpop-ret)))
+(defcode "RSP!"
+  (fmemset *rp* (fpop)))
+(defcode "RSP@"
+  (fpush *rp*))
+(defcode "RSDROP"
+  (fpop-ret))
+
+
 ;;; The interpreter setup and loop.
 (defun interpret ()
   (setf *words* nil)
@@ -169,7 +198,7 @@
                (if entry
                    (funcall (fmemget (codeword-addr entry)))
                    (fpush (parse-integer word)))))
-    ;; TODO: when it's actually ready to run by itself.
+    ;; TODO: uncomment when it's actually ready to run by itself.
     ;;(word-loop)
     ))
 

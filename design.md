@@ -148,3 +148,52 @@ Maybe implement in low-level first, without loops.
 
 == Step 3: conditionals.
 First do the primitives, 0branch or whatever.
+
+### TODO
+Here are all the words that I will need:
+- word: uses key to read into internal buffer
+- number: reads numbers in base BASE from a given address.
+- find: looks up word in dictionary (as parsed by WORD)
+- built-in variables: state (mode), latest (latest word), here (next place to write), S0 (base of parameter stack), base (number base)
+- built-in constants: version, r0, docol, f_immed, f_hidden, f_lenmask
+- cmove (block copy)?
+- param stack words: dsp@, dsp!
+- key: read next byte from stdin and push on stack (fills a buffer, also checks if stdin has closed and if so it exits the program)
+- >CFA: turns dictionary pointer into codeword pointer
+  So "WORD DOUBLE FIND >CFA" would end up with a pointer to the codeword
+  address for DOUBLE.
+- >DFA: same but for data field, first address after codeword.
+- On INTERPRET: "FORTH has an INTERPRET function (a true interpreter this time, not DOCOL) which runs in a loop, reading words (using WORD), looking them up (using FIND), turning them into codeword pointers (using >CFA) and deciding what to do with them."
+  Now, obviously what it does depends on the mode.
+  If compile mode, writes to dict. If IMMEDIATE mode, calls EXECUTE.
+- IMMEDIATE: toggles immediate flag of current word.
+- HIDDEN: same for hidden flag. Called after dictionary header created and by semicolon. Used like 'LATEST @ HIDDEN'. Another form is 'HIDE WORDNAME'.
+- CREATE: creates header of word in dictionary (see: HERE).
+- ,: writes item to dictionary at HERE.
+- [: switch to immediate mode
+- ]: switch to compile mode
+- we also need a way to set a word to HIDDEN, so that FIND skips it.
+- ': returns cw pointer of next word.
+- branching: BRANCH and 0BRANCH (see Jones)
+- ." implemented in terms of LITSTRING and TELL (see Jones)
+- QUIT: clear can actually be implemented in terms of RZ and RSPSTORE (return stack manipulating words). Then it calls INTERPRET and branches back to the start.
+- CHAR: puts ascii code of first char of next word on stock.
+- return stack and input buffer need space in memory.
+
+Then... it's SELF-HOSTING!? I can define new words in Forth, I think?
+
+ROADMAP:
+- Definition of colon (works in the context of INTERPRET):
+   read next word, create dictionary header, toggle hidden, toggle compile mode
+- Definition of semicolon:
+    toggle hidden, toggle compile mode
+- Requirements: toggles, word, create
+- Requirements for interpret: looping, word, 0branch, write to dict (',' word), execute
+- Other things: I'll need proper variable/constant support.
+  Somehow need to mark them.
+
+(defword "name" "definition")
+Bootstrapping involves reading all the words, setting input stream to point to those words (somehow), and compiling them by running Forth routines.
+
+### Lower-priority words
+- +! (addstore), -! (...)
