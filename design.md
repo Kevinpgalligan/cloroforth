@@ -1,3 +1,21 @@
+### Links and notes
+- Next steps to get minimal Forth interpreter:
+   -> Primitives for colon compiler / interpreter loop.
+   -> Colon compiler.
+   -> QUIT.
+   -> Any remaining Forth words.
+- Standard: https://forth-standard.org/standard/core/WORD
+- https://yosefk.com/blog/my-history-with-forth-stack-machines.html
+- https://www.reddit.com/r/Forth/comments/tativh/comment/i04bytd/
+- Links to a C impl of Forth: https://news.ycombinator.com/item?id=31368212
+- Verbosely extolling the virtues of Forth: https://ratfactor.com/forth/the_programming_language_that_writes_itself.html
+- Forth primer: http://galileo.phys.virginia.edu/classes/551.jvn.fall01/primer.htm
+- https://evincarofautumn.blogspot.com/2012/02/why-concatenative-programming-matters.html
+- https://old.reddit.com/r/Forth/comments/j0lxgq/sectorforth_a_16bit_x86_forth_that_fits_in_a_boot/
+- https://100r.co/site/uxn_design.html
+- WASM Forth: https://github.com/remko/waforth/blob/master/src/waforth.wat
+- Explanation of how to implement conditionals: https://www.reddit.com/r/Forth/comments/tativh/comment/i04bytd/
+
 ### Memory model
 See: https://www.forth.com/starting-forth/9-forth-execution/#Forth_Geography
 Also useful: https://forth-standard.org/standard/core/WORD
