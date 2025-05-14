@@ -1,0 +1,101 @@
+(((In which I think through various parts of the design and get
+   to grips with the indirect threading model.
+   Still some details to iron out, like how memory will work (cells &
+   where things are stored in memory). And need to refresh myself on
+   what the primitives are, like QUIT.
+   14/05/2025
+)))
+
+Here are my attempts to understand the indirect threading model, described here: https://www.bradrodriguez.com/papers/moving1.htm
+
+Here's SQUARE:
+
+  : SQUARE dup * ;
+
+When SQUARE is contained in another word's definition, and execution reaches it...
+ip contains the address of the code field of SQUARE.
+The interpreter does the following:
+     w = ip
+     ip += 1
+     execute (w)
+i.e. it executes whatever's in the code field originally pointed to by ip, after first incrementing ip.
+In the case of SQUARE, the code field contains the ENTER function. Here's the definition
+
+(defun enter ()
+  ; push ip on stack (the value on the stack is the address of the next word after SQUARE, so we can get back to it after SQUARE has finished executing)
+  ; ip = [next address after code field, stored in (w)?]
+  ; (normally, this would also call NEXT, to interpret the word whose codeword address is now stored in ip, but I'm not sure if my interpreter will work that way)
+  )
+
+Regarding the last part: all of the machine code definitions contain this line:
+
+      JUMP to interpreter
+
+...but I think the equivalent of this in my Lisp implementation is that the function finishes execution and returns to the interpreter, which then executes the next function
+
+And EXIT...
+
+(defun exit ()
+  ; pop ip off stack
+  )
+
+So, interpreter might work as follows:
+
+(defun interpret ()
+  (loop do (let ((w ip))
+             [increment ip]
+             (funcall [get function pointed to by w]))))
+
+YES, I think this works.
+The only part I'm confused by...
+What's "w" in my interpreter? I need access to that
+in `enter`. This can probably be considered a separate "virtual register", as described in the webpage above. Which means I need to store it somewhere alongside ip, (p)sp, rsp...
+
+Question: how should the "virtual registers" be represented?
+Should they be CL variables, or should they be stored in the Forth memory blob somewhere?
+
+That leads to another outstanding design question.
+How to lay out memory?
+There needs to be a parameter stack, return stack, user variables, buffer (for reading words)...
+
+How does the system start?
+I think we set ip -> QUIT and then run the interpreter!
+What exactly does QUIT do? I think it reads input in a loop,
+parses words and executes them? Need to refresh my memory.
+
+Okay. But how do we compile all the words defined in Forth?
+One way: load all the definitions into memory (they're all strings) and execute them.
+Not sure what primitive should be used to do the execution, wouldn't QUIT get stuck waiting for input?
+Alternatively!
+One at a time, load definitions into memory and execute them.
+Think about SQUARE:
+    : SQUARE dup * ;
+I think there should be a primitive that says "execute while there are words in the buffer, then return".
+And another that alternates between that, and reading from stdin to get new words.
+Eventually, the "execute next word in buffer" can prob be implemented in Forth itself. But for now, it can be a primitive.
+I think that's what I was going for in the existing code, tbh?
+
+MORE QUESTIONS:
+- How does immediate mode work?
+  colon (:) creates new dictionary entry, writes in name of word.
+  Then enables compile mode.
+  Normally, when encountering a word, we look it up and execute it.
+  But in compile mode, we instead write the codeword address of the word to the dictionary.
+  However, IF that word has the immediate mode flag (set in its header), then we execute it even when we're in compile mode.
+  The semi-colon just exits compile mode.
+  I'm pretty sure that's how it all works?
+  SO, bootstrapping-wise... in the normal interpreter loop,
+  we read user input, dump it into buffer, execute all the words, repeat.
+  when bootstrapping, replace "read user input" with "read the next command we wanna load".
+ 
+- what's in a byte/cell?
+  a "cell" is what's called a "word" in CPU land, they just say "cell" because "word" means something else in Forth.
+  Forth model seems to assume that it was BYTE-LEVEL access to memory. So I do need to store e.g. strings as individual bytes.
+  What's less clear... do I need to split numbers in the same way?
+  To make the implementation more flexible, it'd be nice
+  if the cell size were configurable.
+  Splitting numbers will make arithmetic primitives more awkward
+  to implement, and less efficient. But it'll be more "true
+  to Forth", I think.
+  Question -- are addresses = cells in size? How about
+  elements on the parameter stack, and variables?
