@@ -1,0 +1,174 @@
+## The Plan
+1. [DONE] Design exact memory model & what needs to be a variable / native.
+2. Implement that model and functions for manipulating it.
+   `-> A "cell" is a "word", e.g. 2 bytes. Also determines the pointer size & max memory space.
+   `-> The dictionary! Reading input!
+3. Figure out exactly what's needed for the core loop. What the hell is DOCOL?
+   (https://www.forth.com/starting-forth/9-forth-execution/)
+   (Okay, I think it's "do colon", i.e. it executes words that were
+    defined with the colon).
+4. Implement it!
+
+## Reviewing the Forth memory model
+Listing the typical segments, in order, and explaining how they map to our implementation.
+Starting from low memory.
+
+1. pre-compiled Forth
+This is just compiled Common Lisp code, ignore.
+
+2. system vars
+Variables used by Common Lisp code. Ignore.
+
+3. load definitions
+I'm not sure what this is, presumably it's the Forth code that we load on startup. Which would also be ignorable.
+
+4. user dictionary
+See design.txt for the anatomy of a dictionary entry.
+CP points to the next available cell; HERE stores the value of CP on the stack
+(definition of here... `: HERE   CP @ ;`)
+`,` stores a value in the dictionary! That is, `: ,   HERE !  CELL ALLOT ;`.
+(CELL is the number of bytes in a cell; ALLOT advances CP by a given amount; so we're basically
+ moving CP past the cell we just stored in the dictionary)
+
+5. EMPTY SPACE
+I guess this is for the dictionary to grow into.
+
+6. PAD
+Some fixed offset from CP.
+"it is usually used to hold ASCII character strings that are being manipulated prior to being sent out to a terminal. For example, the number formatting words use the pad to hold the ASCII numerals during the conversion process, prior to TYPE."
+The dictionary isn't ever changed at the same time as the PAD. Otherwise, the PAD would be messed up.
+Doesn't have to be much of an offset... in fact, I'm not sure why there needs to be ANY offset. Maybe
+just to distinguish them if someone dumps the dictionary's memory location.
+Can just be a word like `: PAD HERE 340 + ;` (example from Starting Forth)
+
+7. EMPTY SPACE
+To separate the dictionary, and the PAD, from the parameter stack.
+"In most systems there are hundreds of kilobytes between the beginning of the pad and the top of the parameter stack."
+
+8. parameter stack
+Grows towards low memory.
+`SP@` is a word that returns the stack pointer!
+`DUP` can be implemented with `SP@ @`.
+`S0` is a variable, gives the next address after the bottom of the stack, e.g. next highest memory address where the stack will never write.
+(Starting Forth notes that SP@ and S0 are non-standard names.
+ Also notes that "double-length" numbers, made of 2 cells, are always stored so that the
+ higher-order cell is in lower memory. But I don't think I'll implement that).
+
+9. TIB  (Terminal Input Buffer)
+Grows towards high memory. This is where text input is stored and scanned by the interpreter.
+
+10. return stack
+"Above the buffer resides the return stack, which operates identically to the parameter stack. There are no high-level Forth words analogous to S0 and SP@ that refer to the return stack."
+So, basically, we can represent the return stack as a CL data structure.
+
+11. user variables
+Such as BASE, SP0, ...
+Most of the user variables:
+  TIB -> Returns the address of the start of the terminal input buffer.
+  #TIB -> Contains the size of the contents of the terminal input buffer.
+  BASE -> ...
+  H    -> Dictionary pointer. Pointer to the next available byte.
+          (Huh? I thought that was called something else).
+  >IN  -> A pointer to the current position parsed in the input stream.
+
+These are distinct from "ordinary" variables, the value of which is stored in their dictionary entry!
+> Each user variable, on the other hand, is kept in an array called the “user table.”
+> The dictionary entry for each user variable is located elsewhere; its body contains an offset into the user table. When you execute the name of a user variable, such as BASE, this offset is added to the beginning address of the user table, allowing you to use @ or ! in the normal way.
+
+Okay, so user variables have their own "execution token" or codeword, that just takes the offset from the body
+of the dictionary entry and adds it to the user table memory address.
+
+12. buffers
+I guess this is where the user can store their own stuff.
+
+## Design of the cloroforth memory model
+Starting at address 0 is the dictionary. How much of an offset do we need to the parameter stack?
+
+Start by considering how many words we wanna support in the dictionary. Let's say... 1000. Or whatever.
+Estimate the average size of an entry, multiply by 1000, add the pad, and add the amount of memory
+required to store the max-supported stack size.
+These can all be configured at runtime.
+
+The size of the TIB is determined by the max line size we support. Can also be configured.
+
+Then come the user variables. The start address is determined by the previous memory regions.
+We know ahead of time how many vars there are, each is the size of a cell.
+(Can also automatically construct the dictionary entries).
+
+Finally, the buffers! Which can be arbitrarily big, I guess.
+
+## The core loop
+Use `'` to find the execution token/codeword of a word in the dictionary.
+I'm confused, because apparently that can be used to DUMP the contents of the definition?
+My interpretation of this... it must return the memory address of the
+codeword ID in the dictionary entry.
+Nope, still confused.
+Okay, seems like it points to the machine code that executes a given word.
+What I don't understand is how this works in the case of e.g. DOCOL. When
+the machine code has to make use of the dictionary entry, how does it
+access that memory???
+
+Anyway. Here's how I think it works.
+INTERPRET fetches one word at a time from the input stream until it runs out, uses `'` to get the xt of each word and calls EXECUTE on each.
+Meh. Need to read the other notes I took, I've been through this already.
+
+In q-and-a.txt, the pseudocode function "interpret" may actually be the implementation
+of EXECUTE. INTERPRET is an outer loop that reads all words in the stream and calls
+EXECUTE on them.
+Hm, or is my "interpret" more like the "DOCOL" implementation?
+
+Let's say EXECUTE takes a codeword address.
+     w = that address
+     ip = w+1
+     ++ip
+     runs code given by w
+       (this is where a level of indirection comes... I have a table of CL functions
+        and their IDs, the "codeword" is mapped to a function and that function is
+        called).
+
+So, let's say we pass this input to INTERPRET:
+  "2 SQUARE"
+2 is not a codeword, so it's parsed as a number and pushed on the stack.
+SQUARE has been added to the dictionary via a colon definition.
+INTERPRET finds the address of the codeword of that dict entry.
+Then calls EXECUTE on it.
+
+EXECUTE takes codeword address of SQUARE, sets IP to next address, and runs.
+It's DOCOL! (actually, that's the name used in jonesforth)
+   : square dup * ;
+First up in the data segment of the SQUARE is the address of the dup codeword.
+DOCOL starts a loop:
+  push address of "*" in data body of "square" on the return stack.
+  execute dup (this ends up being machine code)
+FUCK.
+
+I think past Kevin was smarter than me. `interpret` was actually supposed to be
+the outer loop of my entire Forth interpreter.
+If QUIT is implemented as a colon definition...
+
+   : QUIT 
+     BEGIN
+      CLEAR (clear return stack)
+      BLAH  (accept input)
+      INTERPRET
+      ." ok. " CR
+     AGAIN ;
+
+First, we set ip=address of QUIT codeword.
+Call `interpret`.
+This sets w=ip (pointing to QUIT codeword),
+   increments ip (pointing to QUIT body),
+   executes w
+It's the DOCOL codeword! Now ip points to address where BEGIN codeword address is stored.
+Apparently this pushes ip to stack, sets ip to whatever value is pointed to by ip, and increments ip.
+But that wouldn't work... we need it to point to the codeword, in this case it'd point to the data body of BEGIN.
+
+I'll try to work it out myself.
+set w=address of QUIT codeword
+ip can be whatever the fuck
+we run DOCOL, which pushes ip on the ret stack and sets ip=w+1, then returns
+now, ip points to address containing address of BEGIN
+w=ip
+++ip
+
+CONSULT NOTEBOOK, I think I've figured it out (again).
