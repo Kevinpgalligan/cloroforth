@@ -3,106 +3,80 @@
 
 (in-package cloroforth.interpret)
 
-;;; Global vars used for easy access to the attributes of the
-;;; currently-used Forth state.
-(defparameter *state* nil)
-(defparameter *ip* nil "Instruction pointer.")
-(defparameter *sp* nil "Parameter stack pointer.")
-(defparameter *rp* nil "Return stack pointer.")
-(defparameter *dp* nil "Dictionary pointer.")
-(defparameter *here* nil "First free address after dictionary.")
-(defparameter *mem* nil "Memory array.")
+(defparameter *pad-offset* 340)
 
-;;; Forth state.
-(defclass forth-state ()
-  ((ip :initarg :ip :accessor ip)
-   (dp :initarg :dp :accessor dp)
-   (here :initarg :here :accessor here)
-   (sp :initarg :sp :accessor sp)
-   (rp :initarg :rp :accessor rp)
-   (retstack :initarg :retstack :accessor retstack)
-   (memory :initarg :memory :accessor memory)
-   (dict :initform nil :accessor dict)))
+;;; System variables used by the interpreter.
+(defparameter *ip* nil "Instruction pointer, holds memory address of a codeword token to execute.")
+(defparameter *sp* nil "Stack pointer, holds memory address of the parameter stack.")
+(defparameter *base* nil "Address pointing to base of the parameter stack.")
+(defparameter *return-stack* nil "Return stack, an actual CL data structure.")
+(defparameter *mem* nil "The memory array.")
+(defparameter *cell-size* nil "The number of bytes used by a single cell (a.k.a. 'machine word').")
 
-(defun make-forth-state (&key (memory-size 1048576))
-  (make-instance 'forth-state
-                 :ip 0
-                 :dp 0
-                 :here 0
-                 :sp (1- memory-size)
-                 :rp 0 ; nee
-                 :memory (make-array memory-size)))
+(defun make-byte-array (size)
+  (make-array size :element-type '(unsigned-byte 8)))
 
-(defclass dict-entry ()
-  ((name :initarg :name :reader name)
-   (start-addr :initarg :start-addr :reader start-addr)
-   (name-addr :initarg :name-addr :reader name-addr)
-   (codeword-addr :initarg :codeword-addr :reader codeword-addr)
-   (data-addr :initarg :data-addr :reader data-addr)))
+;;; Initialising the state of the interpreter.
+;; Default system memory is currently ~2MB, should be enough to store the dictionary & parameter stack.
+(defun init-forth (&key (cell-size 4) (max-line-size 1000)
+                     (system-memory 2097152) (user-memory 1048576))
+  (let ((total-memory (+ system-memory max-line-size user-memory)))
+    (assert (> (expt 2 (* cell-size 8)) total-memory))
+    (setf *cell-size* cell-size)
+    (setf *sp* system-memory)
+    (setf *base* system-memory)
+    (setf *rp* nil)
+    (setf *mem* (make-byte-array total-memory))))
 
-(defun make-dict-entry (name start-addr)
-  ;; 1 cell for pointer to the next dictionary
-  ;; entry and 1 cell for the flags/length.
-  (let* ((name-addr (+ 2 start-addr))
-         (codeword-addr (+ name-addr (length name))))
-    (make-instance 'dict-entry
-                   :name name
-                   :start-addr start-addr
-                   :name-addr name-addr
-                   :codeword-addr codeword-addr
-                   :data-addr (1+ codeword-addr))))
+;;; Memory utilities.
+;; TODO Need to handle negative numbers, i.e. twos complement.
+(defun read-cell (mem address cell-size)
+  (loop with value = 0
+        for i from address below (+ address cell-size)
+        ;; Big-endian!
+        do (setf value (+ (aref mem i) (* value 256)))
+        finally return value))
 
-(defun dictionary-lookup (name)
-  (find name (dict *state*) :key #'name :test #'string=))
+(defun write-cell! (mem address value cell-size)
+  (loop for i from (+ address cell-size -1) downto address
+        do (progn
+             ;; TODO I think there's a way to get the quotient and remainder with
+             ;; one function call & multiple-value-bind.
+             (setf (aref mem i) (mod value 256))
+             (setf value (rem value 256)))))
 
-(defmacro with-forth (state &body body)
-  (alexandria:once-only (state)
-    `(let ((*state* ,state)
-           (*ip* (ip ,state))
-           (*dp* (dp ,state))
-           (*here* (here ,state))
-           (*sp* (sp ,state))
-           (*rp* (rp ,state))
-           (*mem* (memory ,state)))
-       ,@body)))
+;;; Memory operations specific to the running interpreter, all prefixed with "f".
+(defun fread-cell (address)
+  (read-cell *mem* address *cell-size*))
 
+(defun fwrite-cell! (address value)
+  (write-cell! *mem* address value *cell-size*))
 
-;;; Next, low-level primitives used for interacting with the
-;;; active Forth state. All prefixed with 'f' to distinguish them.
+;; Parameter stack, in user-accessible memory.
+(defun fpush (value)
+  ;; Parameter stack grows towards low memory.
+  (decf *sp* *cell-size*)
+  (fwrite-cell! *sp* value))
 
-(defmacro def-stack-ops (push-name pop-name var-name increasing)
-  `(progn
-     (defun ,push-name (x)
-       (setf (aref *mem* ,var-name) x)
-       (,(if increasing 'incf 'decf) ,var-name))
-     (defun ,pop-name ()
-       ,(if increasing
-            `(when (>= ,var-name (length *mem*))
-              (error "Stack is empty."))
-            nil)
-       (incf ,var-name)
-       (aref *mem* ,var-name))))
+(defun fpop ()
+  (when (>= *sp* *base*)
+    (error "Tried to pop from empty parameter stack!"))
+  (let ((v (read-cell *mem* *sp* *cell-size*)))
+    (fread-cell *sp*)
+    (incf *sp* *cell-size*)))
 
-;;; Push and pop to/from the Forth parameter stack.
-(def-stack-ops fpush fpop *sp* nil)
-;;; And the return stack.
-(def-stack-ops fpush-ret fpop-ret *rp* t)
+;; Return stack, not directly accessible to the user.
+(defun fpush-ret (value)
+  (push *return-stack*))
 
-;;; Convenience functions for memory.
-(defun fmemget (addr)
-  "Gets the value at address ADDR in memory."
-  (aref *mem* addr))
-(defun fmemset (addr value)
-  (setf (aref *mem* addr) value))
-(defun fmemget-pointer (addr)
-  "Gets the value *pointed to* by the value at ADDR in memory."
-  (fmemget (fmemget addr)))
-(defun fdictwrite (x)
-  (fmemset *here* x)
-  (incf *here*))
+(defun fpop-ret (value)
+  (when (null *return-stack*)
+    (error "Tried to pop from empty return stack!"))
+  (pop *return-stack*))
 
 (defun fnext ()
-  (incf *ip*))
+  "Moves forward the instruction pointer."
+  (incf *ip* *cell-size*))
 
 
 ;;; The codewords!

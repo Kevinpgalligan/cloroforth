@@ -172,3 +172,44 @@ w=ip
 ++ip
 
 CONSULT NOTEBOOK, I think I've figured it out (again).
+
+## Implementation notes
+I think it was getting overcomplicated with all the macros. Also, wasn't clear how to keep the state object
+in sync with the globals.
+
+So, global variables, yay!
+
+Need to write functions for manipulating cells: writing, reading, ...
+Use that to implement "push" and "pop" for the parameter stack.
+The return stack is just regular push and pop.
+
+Data structure for the dictionary entry:
+  link (cell size)
+  flags/length (1 byte; maybe separate them?)
+  name (length bytes)
+  codeword (1 byte?)
+  data (however many bytes)
+And implement a function for dumping it to memory.
+And for reading back from memory.
+
+Implement function for finding a word in the dictionary.
+
+Bootstrapping: set *ip* to codeword address of QUIT word, feed in all the Forth-defined words.
+NO. I think the *ip* should contain the address of another address, which itself points to a memory
+cell containing a codeword ID.
+In other words, in C terms, it's an 'int**' type. A pointer to a pointer to a codeword ID.
+This level of indirection means that a colon-defined word has access to the original IP, and the
+address of its dictionary entry; it can push the original IP on the stack and then set the IP to (*IP+1), i.e.
+the first address in the data segment of the dictionary entry.
+So, to bootstrap, we need to store the address of the QUIT word's codeword cell somewhere. And then point IP at that.
+
+Based on the above, the interpreter loop should read the cell at IP; the result is an address; read that
+address to get the next codeword to execute; execute it.
+I'm not sure... need to review implementation of DOCOL. Where does immediate mode etc come into it?
+I guess that's part of the QUIT loop, INTERPRET reads words and calls EXECUTE on each of them, : (colon compiler)
+reads next word and creates dictionary entry and sets compile mode, if in compile mode then EXECUTE writes to
+dictionary (unless immediate flag), then eventually ";" disables compile mode (and writes "exit" or whatever to the
+dict, so that when the word is being executed it'll return when finished).
+Given my latest understanding of the interpreter, DOCOL just has to push ip on the stack and set it to (*IP+1),
+accounting for cell size (1 should be *cell-size*). Basically, same thing I said above (except I didn't
+associate that procedure with DOCOL).
