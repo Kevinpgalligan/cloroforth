@@ -1,31 +1,15 @@
-(in-package hidl-test)
+(in-package cloroforth-test)
 
 (def-suite memory
   :in cloroforth)
 
 (in-suite memory)
 
-(test read-cell
-      ;; TODO
-  )
-
-(test write-cell
-      ;; TODO
-      )
-
-
-(test write-negative-value-cell
-      ;; TODO
-      )
-
-(test read-negative-value-cell
-      ;; TODO
-      )
-
-(test parameter-stack-ops
-      ;; todo
-      )
-
-(test return-stack-ops
-      ;; todo
-      )
+(test read-and-write-cell
+      (let ((xs (make-byte-array 10))
+            (v 285)
+            (addr 0)
+            (cell-size 4))
+        (write-cell! xs addr v cell-size)
+        (format t "~%~a~%" xs)
+        (is (= v (read-cell xs addr cell-size)))))

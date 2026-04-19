@@ -10,5 +10,5 @@
   :depends-on (:alexandria)
   :pathname "src"
   :serial t
-  :components ((:file "core")
+  :components ((:file "interpret")
                ))

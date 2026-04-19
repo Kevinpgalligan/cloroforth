@@ -1,5 +1,5 @@
 (defpackage :cloroforth-test
-  (:use :cl :cloroforth :fiveam))
+  (:use :cl :cloroforth.interpret :fiveam))
 
 (in-package cloroforth-test)
 
