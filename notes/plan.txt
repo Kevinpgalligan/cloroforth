@@ -213,3 +213,11 @@ dict, so that when the word is being executed it'll return when finished).
 Given my latest understanding of the interpreter, DOCOL just has to push ip on the stack and set it to (*IP+1),
 accounting for cell size (1 should be *cell-size*). Basically, same thing I said above (except I didn't
 associate that procedure with DOCOL).
+
+# Dictionary API
+When bootstrapping, just need to write each entry.
+Dunno whether to return the new address, and manually update the dictionary pointer.
+Or, maybe neater to provide write (and read?) functions that automatically handle the pointer.
+Don't wanna create an object whenever reading dict entry.
+So FIND (or whatever) should probably return the start address of the entry.
+The functions to get a dictionary attribute should accept that address.

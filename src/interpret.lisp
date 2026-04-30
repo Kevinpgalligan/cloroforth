@@ -24,6 +24,7 @@
 ;;; System variables used by the interpreter.
 (defparameter *ip* nil "Instruction pointer, holds memory address of a codeword token to execute.")
 (defparameter *sp* nil "Stack pointer, holds memory address of the parameter stack.")
+(defparameter *dp* nil "Dictionary pointer, next available cell in dictionary.")
 (defparameter *base* nil "Address pointing to base of the parameter stack.")
 (defparameter *return-stack* nil "Return stack, an actual CL data structure.")
 (defparameter *mem* nil "The memory array.")
@@ -43,6 +44,7 @@
     (setf *cell-size* cell-size)
     (setf *int-upper-bound* (expt 2 (1- (* 8 *cell-size*))))
     (setf *sp* system-memory)
+    (setf *dp* 0)
     (setf *base* system-memory)
     (setf *return-stack* nil)
     (setf *mem* (make-byte-array total-memory))))
@@ -74,14 +76,28 @@
 (defun fwrite-byte (address value)
   (setf (aref *mem* address) value))
 
+(defun fwrite-dictionary-byte! (value)
+  (fwrite-byte *cp* value)
+  (incf *cp*))
+
+(defun fwrite-dictionary-cell! (value)
+  (fwrite-cell! *cp* value)
+  (incf *cp* *cell-size*))
+
 ;; Parameter stack, in user-accessible memory.
 (defun fpush (value)
   ;; Parameter stack grows towards low memory.
   (decf *sp* *cell-size*)
   (fwrite-cell! *sp* value))
 
+(defun fempty-stack? ()
+  (>= *sp* *base*))
+
+(defun fstack-size ()
+  (floor (- *base* *sp*) *cell-size*))
+
 (defun fpop ()
-  (when (>= *sp* *base*)
+  (when (fempty-stack?)
     (error "Tried to pop from empty parameter stack!"))
   (let ((v (read-cell *mem* *sp* *cell-size*)))
     (fread-cell *sp*)
@@ -102,84 +118,80 @@
   (incf *ip* *cell-size*))
 
 ;;; The dictionary.
-;; 1 byte for flags (currently just immediate mode flag) + length, name, address of
-;; next entry, codeword id (1 byte), and a blob of data.
-(defclass dictionary-entry ()
-  ((name :initarg :name :reader name)
-   (codeword-id :initarg :codeword-id :reader codeword-id)
-   (immediate? :initarg :immediate? :reader immediate?)))
+(defconstant +immediate-flag+ (ash 1 7))
 
-(defun make-dictionary-entry (name codeword-id immediate?)
-  (make-instance 'dictionary-entry
-                 :name name
-                 :codeword-id codeword-id
-                 :immediate? immediate?))
-
-(defun write-dictionary-entry! (mem address cell-size prev-entry-address entry)
-  (setf (aref mem address)
-        (logxor (if (immediate? entry) (ash 1 7) 0)
-                (length (name entry))))
-  (incf address)
+(defun fwrite-dictionary-entry! (name immediate? prev-entry-address codeword-id)
   ;; Max length of word names will depend on the number of flags squashed into
   ;; the length byte, currently it's just 1.
-  (when (>= (length (name entry)) (ash 1 7))
+  (when (>= (length name) +immediate-flag+)
     (error "Word name is too long."))
-  (loop for c across (name entry)
-        do (progn
-             (setf (aref mem address) (char-code c))
-             (incf address)))
-  (write-cell! mem address cell-size prev-entry-address)
-  (incf address cell-size)
-  (setf (aref mem address) (codeword-id entry))
-  (incf address)
-  address)
+  (fwrite-dictionary-byte!
+   (logxor (if immediate? +immediate-flag+ 0)
+           (length name)))
+  (loop for c across name
+        do (fwrite-dictionary-byte! (char-code c)))
+  (fwrite-dictionary-cell! prev-entry-address)
+  (fwrite-dictionary-byte! codeword-id))
 
-(defun read-dictionary-entry (mem address cell-size)
-  (let* ((b (aref mem address))
-         (name-length (logandc2 b (ash 1 7)))
-         (immediate? (not (= b name-length)))
-         (name (coerce (loop for i from (1+ address) below (+ address 1 name-length)
-                             collect (code-char (aref mem i)))
-                       'string)))
-    (incf address (+ 1 name-length)) ; skip length byte + name
-    (let ((link (read-cell mem address cell-size)))
-      (incf address cell-size)
-      (let ((codeword-id (aref mem address)))
-        (values
-         (make-instance 'dictionary-entry :immediate? immediate? :name name :codeword-id codeword-id)
-         link)))))
+;;; Defining codewords.
+(defvar *codewords* (make-array 0 :fill-pointer t :adjustable t))
+
+(defclass codeword-def ()
+  ((name :initarg :name :reader name)
+   (documentation :initarg :documentation :reader documentation)
+   (implementation-fun :initarg :implementation-fun :accessor implementation-fun)))
+
+(defmacro defcode (name params &body body)
+  (alexandria:with-unique-names (cw existing)
+    `(let ((,cw (make-codeword-def :name ,name
+                                   :documentation ,(getf params :doc)
+                                   :implementation-fun (lambda ()
+                                                         ,@body
+                                                         ;; Very important. After the execution of each word
+                                                         ;; we increment the instruction pointer to move to
+                                                         ;; the next word.
+                                                         (fnext)))))
+       ;; TODO need to write to the dictionary if there's a running Forth process.
+       (let ((,existing (find ,name *codewords* :key #'name :test #'string=)))
+         (if ,existing
+             (setf
+              (documentation existing) (documentation cw)
+              (implementation-fun existing) (implementation-fun cw))
+             (vector-push-extend cw *codewords*))))))
+
+;;; The codewords themselves!
+;; For user-defined words.
+(defcode "docol"
+    (:doc "For executing user-defined words.")
+  (fpush-ret *ip*)
+  (setf *ip* (fread-cell *ip*)))
+
+(defcode "exit"
+    (:doc "Used to return from user-defined words, by popping off the return stack.")
+  (setf *ip* (fpop-ret)))
+
+;; Basic manipulation of the parameter stack.
+(defcode "drop"
+    (:doc "Discards a value from the parameter stack.")
+  (fpop))
+
+(defcode "dup"
+    (:doc "Duplicates the value on top of the parameter stack.")
+  (when (fempty-stack?)
+    (error "Tried to dup when parameter stack is empty."))
+  ;; sp holds the address of the last value pushed to the stack.
+  (fpush (fread-cell *sp*)))
+
+(defcode "swap"
+    (:doc "Swaps the two values at the top of the stack.")
+  (when (< (fstack-size) 2)
+    (error "Not enough values on parameter stack to swap."))
+  (let ((a (fpop))
+        (b (fpop)))
+    (fpush a)
+    (fpush b)))
 
 (when nil
-
-;;; The codewords!
-  (defparameter *codewords* nil)
-
-  (defclass codeword-def ()
-    ((name :initarg :name :reader name)
-     (implementation-fun :initarg :implementation-fun :accessor implementation-fun)))
-
-  (defun make-codeword-def (name f)
-    (make-instance 'codeword-def
-                   :name name
-                   :implementation-fun f))
-
-  ;; TODO: make this flexible enough that it can accept args
-  ;;       like documentation. I wanna generate the documentation.
-  ;; TODO: codewords are written into dict in opposite order.
-  (defmacro defcode (name &body body)
-    `(let ((cw (make-codeword-def
-                ,name
-                (lambda ()
-                  ,@body
-                  (fnext)))))
-       (let ((existing (find ,name *codewords* :key #'name :test #'string=)))
-         (if existing
-             (setf (implementation-fun existing) (implementation-fun cw))
-             (push cw *codewords*)))
-       ;; This lets us define new codewords, or redefine them, as the Forth
-       ;; interpreter is running.
-       (when (and (boundp '*state*) (not (null *state*)))
-         (load-codeword cw))))
 
   (defmacro defop (op-name op-fun)
     `(defcode ,op-name
@@ -189,30 +201,11 @@
   (defop "*" *)
   (defop "/" floor)
 
-  (defcode "dup"
-      (fpush (fmemget (1+ *sp*))))
-
-  (defcode "drop"
-      (fpop))
-
-  (defcode "swap"
-      (let ((a (fpop))
-            (b (fpop)))
-        (fpush a)
-        (fpush b)))
+  
 
   (defcode "."
       (format t "~a~%" (fpop)))
-
-  (defcode "docol"
-      (fpush-ret *ip*)
-    ;; Implicitly allowing fnext to increment the instruction pointer.
-    ;; This idea is used in various places.
-    (setf *ip* (fmemget-pointer *ip*)))
   
-
-  (defcode "exit"
-      (setf *ip* (fpop-ret)))
 
   (defcode "lit"
       (fpush (fmemget (1+ *ip*)))
