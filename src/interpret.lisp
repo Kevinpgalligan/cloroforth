@@ -49,7 +49,8 @@
           *here* 0
           *base* system-memory
           *return-stack* nil
-          *mem* (make-byte-array total-memory))))
+          *mem* (make-byte-array total-memory))
+    'ok))
 
 ;;; Memory utilities.
 (defun read-cell (mem address cell-size)
@@ -79,12 +80,17 @@
   (setf (aref *mem* address) value))
 
 (defun fwrite-dictionary-byte! (value)
-  (fwrite-byte *cp* value)
-  (incf *cp*))
+  (fwrite-byte *here* value)
+  (incf *here*))
 
 (defun fwrite-dictionary-cell! (value)
-  (fwrite-cell! *cp* value)
-  (incf *cp* *cell-size*))
+  (fwrite-cell! *here* value)
+  (incf *here* *cell-size*))
+
+(defun fread-string (address length)
+  (coerce (loop for i from address below (+ address length)
+                collect (code-char (fread-byte i)))
+          'string))
 
 ;; Parameter stack, in user-accessible memory.
 (defun fpush (value)
@@ -142,26 +148,27 @@
 
 (defclass codeword-def ()
   ((name :initarg :name :reader name)
-   (documentation :initarg :documentation :reader documentation)
+   (docstring :initarg :docstring :reader docstring)
    (implementation-fun :initarg :implementation-fun :accessor implementation-fun)))
 
 (defmacro defcode (name params &body body)
   (alexandria:with-unique-names (cw existing)
-    `(let ((,cw (make-codeword-def :name ,name
-                                   :documentation ,(getf params :doc)
-                                   :implementation-fun (lambda ()
-                                                         ,@body
-                                                         ;; Very important. After the execution of each word
-                                                         ;; we increment the instruction pointer to move to
-                                                         ;; the next word.
-                                                         (fnext)))))
+    `(let ((,cw (make-instance 'codeword-def
+                               :name ,name
+                               :docstring ,(getf params :doc)
+                               :implementation-fun (lambda ()
+                                                     ,@body
+                                                     ;; Very important. After the execution of each word
+                                                     ;; we increment the instruction pointer to move to
+                                                     ;; the next word.
+                                                     (fnext)))))
        ;; TODO need to write to the dictionary if there's a running Forth process.
        (let ((,existing (find ,name *codewords* :key #'name :test #'string=)))
          (if ,existing
              (setf
-              (documentation existing) (documentation cw)
-              (implementation-fun existing) (implementation-fun cw))
-             (vector-push-extend cw *codewords*))))))
+              (docstring existing) (docstring ,cw)
+              (implementation-fun ,existing) (implementation-fun ,cw))
+             (vector-push-extend ,cw *codewords*))))))
 
 ;;; The codewords themselves!
 ;; For user-defined words.
@@ -224,5 +231,16 @@
         do (fwrite-dictionary-entry! (name cw) nil *dp* codeword-id)))
 
 (defun ffind-word (name)
-  ;; TODO loop through 
-  )
+  (if (zerop *here*)
+      nil ; dictionary is empty
+      (let ((expected-length (length name)))
+        (loop with addr = *dp*
+              do (let ((length (logandc2 (fread-byte addr) +immediate-flag+)))
+                   (cond
+                     ((and (= length expected-length)
+                           (string= name (fread-string (1+ addr) length)))
+                      (return addr))
+                     ((zerop addr)
+                      (return nil))
+                     (t
+                      (setf addr (fread-cell (+ addr 1 length))))))))))
