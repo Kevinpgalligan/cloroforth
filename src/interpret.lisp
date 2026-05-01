@@ -24,7 +24,8 @@
 ;;; System variables used by the interpreter.
 (defparameter *ip* nil "Instruction pointer, holds memory address of a codeword token to execute.")
 (defparameter *sp* nil "Stack pointer, holds memory address of the parameter stack.")
-(defparameter *dp* nil "Dictionary pointer, next available cell in dictionary.")
+(defparameter *dp* nil "Dictionary pointer, holds memory address of last dictionary entry.")
+(defparameter *here* nil "Next available cell in dictionary.")
 (defparameter *base* nil "Address pointing to base of the parameter stack.")
 (defparameter *return-stack* nil "Return stack, an actual CL data structure.")
 (defparameter *mem* nil "The memory array.")
@@ -41,13 +42,14 @@
                      (system-memory 2097152) (user-memory 1048576))
   (let ((total-memory (+ system-memory max-line-size user-memory)))
     (assert (> (expt 2 (* cell-size 8)) total-memory))
-    (setf *cell-size* cell-size)
-    (setf *int-upper-bound* (expt 2 (1- (* 8 *cell-size*))))
-    (setf *sp* system-memory)
-    (setf *dp* 0)
-    (setf *base* system-memory)
-    (setf *return-stack* nil)
-    (setf *mem* (make-byte-array total-memory))))
+    (setf *cell-size* cell-size
+          *int-upper-bound* (expt 2 (1- (* 8 *cell-size*)))
+          *sp* system-memory
+          *dp* 0
+          *here* 0
+          *base* system-memory
+          *return-stack* nil
+          *mem* (make-byte-array total-memory))))
 
 ;;; Memory utilities.
 (defun read-cell (mem address cell-size)
@@ -121,6 +123,8 @@
 (defconstant +immediate-flag+ (ash 1 7))
 
 (defun fwrite-dictionary-entry! (name immediate? prev-entry-address codeword-id)
+  ;; This is now the latest entry in the dictionary.
+  (setf *dp* *here*)
   ;; Max length of word names will depend on the number of flags squashed into
   ;; the length byte, currently it's just 1.
   (when (>= (length name) +immediate-flag+)
@@ -191,38 +195,34 @@
     (fpush a)
     (fpush b)))
 
-(when nil
+(defmacro defop (op-name op-fun)
+  `(defcode ,op-name ()
+     (fpush (mod (,op-fun (fpop) (fpop)) *int-upper-bound*))))
+(defop "+" +)
+(defop "-" -)
+(defop "*" *)
+(defop "/" floor)
 
-  (defmacro defop (op-name op-fun)
-    `(defcode ,op-name
-         (fpush (,op-fun (fpop) (fpop)))))
-  (defop "+" +)
-  (defop "-" -)
-  (defop "*" *)
-  (defop "/" floor)
+(defcode "."
+    (:doc "Pop a value off the parameter stack and print it.")
+  (let ((v (fpop))
+        (negative-cutoff (/ *int-upper-bound* 2)))
+    (format t
+            "~a~%"
+            (if (< v negative-cutoff)
+                v
+                ;; Handling two's complement. Given 4 bits, the range of possible integers is
+                ;; [-8, +7] (inclusive). In two's complement, the negative numbers are remapped to [+8, +15]
+                ;; (that's a total of 8 negative values), where +8 is -8, +9 is -7, etc. In modulo arithmetic,
+                ;; they behave the same as if they were negative. Anyway, here we need to map the range
+                ;; [+8, +15] back to negative values.
+                (- v *int-upper-bound*)))))
 
-  
+(defun fwrite-all-codewords-to-dictionary! ()
+  (loop for cw across *codewords*
+        for codeword-id from 0
+        do (fwrite-dictionary-entry! (name cw) nil *dp* codeword-id)))
 
-  (defcode "."
-      (format t "~a~%" (fpop)))
-  
-
-  (defcode "lit"
-      (fpush (fmemget (1+ *ip*)))
-    (incf *ip*))
-
-  (defcode "!"
-      (fmemset (fpop) (fpop)))
-  (defcode "@"
-      (fpush (fmemget (fpop))))
-
-  (defcode ">R"
-      (fpush-ret (fpop)))
-  (defcode "R>"
-      (fpush (fpop-ret)))
-  (defcode "RSP!"
-      (fmemset *rp* (fpop)))
-  (defcode "RSP@"
-      (fpush *rp*))
-  (defcode "RSDROP"
-      (fpop-ret)))
+(defun ffind-word (name)
+  ;; TODO loop through 
+  )
