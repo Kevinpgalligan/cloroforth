@@ -21,12 +21,14 @@
 
 (defparameter *pad-offset* 340)
 
-;;; System variables used by the interpreter.
+;;;; System variables used by the interpreter.
 (defparameter *ip* nil "Instruction pointer, holds memory address of a codeword token to execute.")
 (defparameter *sp* nil "Stack pointer, holds memory address of the parameter stack.")
 (defparameter *dp* nil "Dictionary pointer, holds memory address of last dictionary entry.")
 (defparameter *here* nil "Next available cell in dictionary.")
 (defparameter *base* nil "Address pointing to base of the parameter stack.")
+(defparameter *tib* nil "Address pointing to start of the terminal input buffer.")
+(defparameter *tib-tracker* nil "Data structure to track input in the TIB.")
 (defparameter *return-stack* nil "Return stack, an actual CL data structure.")
 (defparameter *mem* nil "The memory array.")
 (defparameter *cell-size* nil "The number of bytes used by a single cell (a.k.a. 'machine word').")
@@ -35,24 +37,31 @@
 (defun make-byte-array (size)
   (make-array size :element-type '(unsigned-byte 8)))
 
-;;; Initialising the state of the interpreter.
+(defclass tib-tracker ()
+  ((addr :initarg :addr :accessor addr)
+   (end-addr :initarg :end-addr :accessor end-addr)))
+
+;;;; Initialising the state of the interpreter.
 ;; Default system memory is currently ~2MB, should be enough to store the dictionary & parameter stack.
 ;; And 1MB for the user.
 (defun init-forth (&key (cell-size 4) (max-line-size 1000)
-                     (system-memory 2097152) (user-memory 1048576))
-  (let ((total-memory (+ system-memory max-line-size user-memory)))
+                     (system-memory 2097152) (user-memory 1048576)
+                     (input-buffer-size 200))
+  (let ((total-memory (+ system-memory max-line-size input-buffer-size user-memory)))
     (assert (> (expt 2 (* cell-size 8)) total-memory))
     (setf *cell-size* cell-size
           *int-upper-bound* (expt 2 (1- (* 8 *cell-size*)))
-          *sp* system-memory
           *dp* 0
           *here* 0
+          *sp* system-memory
           *base* system-memory
+          *tib* system-memory
+          *tib-tracker* (make-instance 'tib-tracker :addr 0 :end-addr 0)
           *return-stack* nil
           *mem* (make-byte-array total-memory))
     'ok))
 
-;;; Memory utilities.
+;;;; Memory utilities.
 (defun read-cell (mem address cell-size)
   (loop with value = 0
         for i from address below (+ address cell-size)
@@ -66,7 +75,7 @@
              (setf (aref mem i) (mod value 256))
              (setf value (ash value -8)))))
 
-;;; Memory operations specific to the running interpreter, all prefixed with "f".
+;;;; Memory operations specific to the running interpreter, all prefixed with "f".
 (defun fread-cell (address)
   (read-cell *mem* address *cell-size*))
 
@@ -125,7 +134,7 @@
   "Moves the instruction pointer forward."
   (incf *ip* *cell-size*))
 
-;;; The dictionary.
+;;;; The dictionary.
 (defconstant +immediate-flag+ (ash 1 7))
 
 (defun fwrite-dictionary-entry! (name immediate? prev-entry-address codeword-id)
@@ -143,18 +152,20 @@
   (fwrite-dictionary-cell! prev-entry-address)
   (fwrite-dictionary-byte! codeword-id))
 
-;;; Defining codewords.
+;;;; Defining codewords.
 (defvar *codewords* (make-array 0 :fill-pointer t :adjustable t))
 
 (defclass codeword-def ()
   ((name :initarg :name :reader name)
-   (docstring :initarg :docstring :reader docstring)
+   (codeword-id :initarg :codeword-id :reader codeword-id)
+   (docstring :initarg :docstring :accessor docstring)
    (implementation-fun :initarg :implementation-fun :accessor implementation-fun)))
 
 (defmacro defcode (name params &body body)
   (alexandria:with-unique-names (cw existing)
     `(let ((,cw (make-instance 'codeword-def
                                :name ,name
+                               :codeword-id (length *codewords*)
                                :docstring ,(getf params :doc)
                                :implementation-fun (lambda ()
                                                      ,@body
@@ -162,15 +173,20 @@
                                                      ;; we increment the instruction pointer to move to
                                                      ;; the next word.
                                                      (fnext)))))
-       ;; TODO need to write to the dictionary if there's a running Forth process.
        (let ((,existing (find ,name *codewords* :key #'name :test #'string=)))
          (if ,existing
              (setf
-              (docstring existing) (docstring ,cw)
+              (docstring ,existing) (docstring ,cw)
               (implementation-fun ,existing) (implementation-fun ,cw))
-             (vector-push-extend ,cw *codewords*))))))
+             (progn
+               (vector-push-extend ,cw *codewords*)
+               (when *mem*
+                 (fwrite-codeword-to-dictionary! ,cw))))))))
 
-;;; The codewords themselves!
+(defun fwrite-codeword-to-dictionary! (cw)
+  (fwrite-dictionary-entry! (name cw) nil *dp* (codeword-id cw)))
+
+;;;; The codewords themselves!
 ;; For user-defined words.
 (defcode "docol"
     (:doc "For executing user-defined words.")
@@ -228,7 +244,7 @@
 (defun fwrite-all-codewords-to-dictionary! ()
   (loop for cw across *codewords*
         for codeword-id from 0
-        do (fwrite-dictionary-entry! (name cw) nil *dp* codeword-id)))
+        do (fwrite-codeword-to-dictionary! cw)))
 
 (defun ffind-word (name)
   (if (zerop *here*)
@@ -244,3 +260,43 @@
                       (return nil))
                      (t
                       (setf addr (fread-cell (+ addr 1 length))))))))))
+
+(defun fread-line-into-tib ()
+  (let ((line (or (read-line nil nil) "")))
+    (loop for c across line
+          for addr from *tib*
+          do (fwrite-byte addr (char-code c)))
+    (setf (addr *tib-tracker*) *tib*
+          (end-addr *tib-tracker*) (+ *tib* (length line)))))
+
+(defun fscan-tib-for-word ()
+  "Moves forward scan address in the TIB, skipping whitespace, until a word is found.
+Returns 3 values: whether a word was found (T/NIL), the word start address, and the length."
+  (with-slots (addr end-addr) *tib-tracker*
+    (loop while (and (< addr end-addr)
+                     (is-whitespace? (code-char (fread-byte addr))))
+          do (incf addr)
+          finally (return (if (>= addr end-addr)
+                              (values nil 0 0)
+                              (values t
+                                      addr
+                                      (- (loop for i from (1+ addr)
+                                               while (and (< i end-addr)
+                                                          (not (is-whitespace? (code-char (fread-byte i)))))
+                                               finally (return i))
+                                         addr)))))))
+
+(defun is-whitespace? (c)
+  (member c '(#\Space #\Newline #\Backspace #\Tab #\Linefeed #\Page #\Return)))
+
+(defcode "word"
+    (:doc "Reads input into the TIB (terminal input buffer), skipping whitespace characters until it finds a
+word (sequence of non-whitespace characters). Leaves the address of this word, and its length, on the stack.")
+  (loop do (multiple-value-bind (found? addr length)
+               (fscan-tib-for-word)
+             (when found?
+               (fpush addr)
+               (fpush length)
+               (return)))
+           ;; Didn't find a word so need to read the next line.
+        do (fread-line-into-tib)))
