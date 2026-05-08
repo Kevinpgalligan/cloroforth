@@ -23,10 +23,10 @@
 
 ;;;; System variables used by the interpreter.
 (defparameter *ip* nil "Instruction pointer, holds memory address of a codeword token to execute.")
-(defparameter *sp* nil "Stack pointer, holds memory address of the parameter stack.")
+(defparameter *sp* nil "Stack pointer, holds memory address of the top of the parameter stack.")
+(defparameter *base* nil "Address pointing to base of the parameter stack.")
 (defparameter *dp* nil "Dictionary pointer, holds memory address of last dictionary entry.")
 (defparameter *here* nil "Next available cell in dictionary.")
-(defparameter *base* nil "Address pointing to base of the parameter stack.")
 (defparameter *tib* nil "Address pointing to start of the terminal input buffer.")
 (defparameter *tib-tracker* nil "Data structure to track input in the TIB.")
 (defparameter *return-stack* nil "Return stack, an actual CL data structure.")
@@ -61,7 +61,7 @@
           *mem* (make-byte-array total-memory))
     'ok))
 
-;;;; Memory utilities.
+;;;; Memory operations.
 (defun read-cell (mem address cell-size)
   (loop with value = 0
         for i from address below (+ address cell-size)
@@ -75,7 +75,7 @@
              (setf (aref mem i) (mod value 256))
              (setf value (ash value -8)))))
 
-;;;; Memory operations specific to the running interpreter, all prefixed with "f".
+;; Note that any function prefixed with "f" assumes that global state has been initialised, and depends on it.
 (defun fread-cell (address)
   (read-cell *mem* address *cell-size*))
 
@@ -101,7 +101,30 @@
                 collect (code-char (fread-byte i)))
           'string))
 
-;; Parameter stack, in user-accessible memory.
+(defun ftwos-complement (v)
+  "Negative numbers are represented in the system via two's complement."
+  (cond
+    ((>= *int-upper-bound* v)
+     (error "Value too high."))
+    ((>= v 0)
+     v)
+    ;; Compare to the lower bound (maybe that should have its own variable).
+    ((>= v (1- (- *int-upper-bound*)))
+     ;; Map negative numbers -128,-127,...,-1 to 128,129,...,255.
+     ;; (For the 1-byte case, but should be more general).
+     (+ v (* 2 (1+ *int-upper-bound*))))
+    (t
+     (error "Value too low."))))
+
+(defun fstring= (addr1 addr2 len)
+  (loop repeat len
+        for i from addr1
+        for j from addr2
+        when (not (= (fread-byte i) (fread-byte j)))
+          return nil
+        finally (return t)))
+
+;;;; Parameter stack, in user-accessible memory.
 (defun fpush (value)
   ;; Parameter stack grows towards low memory.
   (decf *sp* *cell-size*)
@@ -121,7 +144,12 @@
     (incf *sp* *cell-size*)
     v))
 
-;; Return stack, not directly accessible to the user.
+(defun fstack-ref (index)
+  (when (>= index (fstack-size))
+    (error "Stack was smaller than expected."))
+  (fread-cell (+ *sp* (* index *cell-size*))))
+
+;;;; Return stack, not directly accessible to the user.
 (defun fpush-ret (value)
   (push value *return-stack*))
 
@@ -135,6 +163,16 @@
   (incf *ip* *cell-size*))
 
 ;;;; The dictionary.
+;; Dictionary entries follow the following format:
+;;    link to previous entry (1 cell)
+;;    length & flags         (1 byte)
+;;    name                   (n bytes)
+;;    codeword ID            (1 byte)
+;;    data                   (n bytes)
+;; A "cell" is what would normally be called a "word" when describing processor architecture, e.g. on a 64-bit
+;; processor a word is 8 bytes. But Forth uses different terminology ("words" can be found in the "dictionary").
+;; Also, in this Forth interpreter, the cell size is configurable.
+
 (defconstant +immediate-flag+ (ash 1 7))
 
 (defun fwrite-dictionary-entry! (name immediate? prev-entry-address codeword-id)
@@ -144,12 +182,12 @@
   ;; the length byte, currently it's just 1.
   (when (>= (length name) +immediate-flag+)
     (error "Word name is too long."))
+  (fwrite-dictionary-cell! prev-entry-address)
   (fwrite-dictionary-byte!
    (logxor (if immediate? +immediate-flag+ 0)
            (length name)))
   (loop for c across name
         do (fwrite-dictionary-byte! (char-code c)))
-  (fwrite-dictionary-cell! prev-entry-address)
   (fwrite-dictionary-byte! codeword-id))
 
 ;;;; Defining codewords.
@@ -246,20 +284,33 @@
         for codeword-id from 0
         do (fwrite-codeword-to-dictionary! cw)))
 
+(defun fdict-get-length (entry-addr)
+  (logandc2 (fread-byte (+ entry-addr *cell-size*)) +immediate-flag+))
+
+(defun fdict-get-name (entry-addr)
+  (fread-string (fdict-get-name-addr entry-addr) (fdict-get-length entry-addr)))
+
+(defun fdict-get-name-addr (entry-addr)
+  (+ entry-addr *cell-size* 1))
+
+(defun fdict-get-link (entry-addr)
+  (fread-cell entry-addr))
+
+(defun fdict-empty? ()
+  (zerop *here*))
+
 (defun ffind-word (name)
-  (if (zerop *here*)
-      nil ; dictionary is empty
-      (let ((expected-length (length name)))
-        (loop with addr = *dp*
-              do (let ((length (logandc2 (fread-byte addr) +immediate-flag+)))
-                   (cond
-                     ((and (= length expected-length)
-                           (string= name (fread-string (1+ addr) length)))
-                      (return addr))
-                     ((zerop addr)
-                      (return nil))
-                     (t
-                      (setf addr (fread-cell (+ addr 1 length))))))))))
+  (if (fdict-empty?)
+      ;; Dictionary is empty.
+      nil
+      (loop with addr = *dp*
+            do (cond
+                 ((string= name (fdict-get-name addr))
+                  (return addr))
+                 ((zerop addr)
+                  (return nil))
+                 (t
+                  (setf addr (fdict-get-link addr)))))))
 
 (defun fread-line-into-tib ()
   (let ((line (or (read-line nil nil) "")))
@@ -290,8 +341,9 @@ Returns 3 values: whether a word was found (T/NIL), the word start address, and 
   (member c '(#\Space #\Newline #\Backspace #\Tab #\Linefeed #\Page #\Return)))
 
 (defcode "word"
-    (:doc "Reads input into the TIB (terminal input buffer), skipping whitespace characters until it finds a
-word (sequence of non-whitespace characters). Leaves the address of this word, and its length, on the stack.")
+    (:doc "Reads input into the TIB (terminal input buffer), skipping whitespace characters, until it finds a
+word (sequence of non-whitespace characters). Leaves the address of this word, and its length, on the stack."
+     :sig "-- addr n")
   (loop do (multiple-value-bind (found? addr length)
                (fscan-tib-for-word)
              (when found?
@@ -300,3 +352,26 @@ word (sequence of non-whitespace characters). Leaves the address of this word, a
                (return)))
            ;; Didn't find a word so need to read the next line.
         do (fread-line-into-tib)))
+
+(defcode "find"
+    (:doc "Takes a reference to a string (and its length) and returns dictionary address of a word of that name. Or, if
+such a word is not found, returns -1."
+     :sig "addr1 n -- addr2 | -1")
+  ;; TODO can make this a macro, with-stack-vars, or maybe incorporate into defcode
+  (let ((len (fpop))
+        (str-addr (fpop)))
+    (when (fdict-empty?)
+      (fpush (ftwos-complement -1)))
+    (loop with ptr = *dp*
+          do (cond
+               ((and (= len (fdict-get-length ptr))
+                     (fstring= (fdict-get-name-addr ptr) str-addr len))
+                (fpush ptr)
+                (break))
+               ;; TODO should probably wrap this in a function, it's repeated in ffind-word, the assumption
+               ;; that the last (well, first) dictionary entry is at address 0.
+               ((zerop ptr)
+                (fpush (ftwos-complement -1))
+                (break))
+               (t
+                (setf ptr (fdict-get-link ptr)))))))
