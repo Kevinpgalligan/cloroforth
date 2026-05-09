@@ -375,3 +375,34 @@ such a word is not found, returns -1."
                 (break))
                (t
                 (setf ptr (fdict-get-link ptr)))))))
+
+(defcode "clear"
+  (:doc "Clears the return stack."
+        :sig "--")
+  (setf *return-stack* nil))
+
+(defcode "u."
+  (:doc "Print unsigned value at the top of the stack."
+        :sig "u --")
+  (format t "~a~%" (fpop)))
+
+(defcode "cr"
+  (:doc "Prints a newline."
+        :sig "--")
+  (format t "~%"))
+
+;; TODO: This could maybe be rewritten in Forth, in terms of "!" and "here".
+(defcode ","
+    (:doc "Writes a value to the dictionary."
+     :sig "v --")
+  (fwrite-dictionary-cell! (fpop)))
+
+(defcode "cell"
+  (:doc "Returns number of bytes in a cell."
+        :sig "-- n")
+  (fpush *cell-size*))
+
+(defcode "here"
+  (:doc "Returns address of next free cell in memory."
+        :sig "-- addr")
+  (fpush *here*))
